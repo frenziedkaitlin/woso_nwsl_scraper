@@ -1,37 +1,36 @@
 from pony.orm import *
+from scrape import * 
 from datetime import datetime
 import os
-from nwsl_scrape import * 
 from pprint import pprint
+import operator 
 
 db = Database()
 
 class Game(db.Entity):
     id= PrimaryKey(int, auto=True)
+    date= Required(datetime)
+    home= Required(str)
+    home_score= Required(int)
     away= Required(str)
     away_score= Required(int)
+    link= Required(str)
+    location= Required(str)
+    attendance= Required(int)
     clearances_away= Required(int)
     clearances_home= Required(int)
     corners_away= Required(int)
     corners_home= Required(int)
     crosses_away= Required(int)
     crosses_home= Required(int)
-    date= Required(datetime)
     duels_won_away= Required(int)
     duels_won_home= Required(int)
     fouls_away= Required(int)
     fouls_home= Required(int)
-    goals = Set('Goal')
-    home= Required(str)
-    home_score= Required(int)
-    link= Required(str)
-    location= Required(str)
     offsides_away= Required(int)
     offsides_home= Required(int)
     passing_accuracy_away= Required(int)
     passing_accuracy_home= Required(int)
-    plays = Set('Play')
-    players = Set('PlayerGame')
     possession_away= Required(float)
     possession_home= Required(float)
     saves_away= Required(int)
@@ -44,6 +43,9 @@ class Game(db.Entity):
     tackles_won_home= Required(int)
     total_passes_away= Required(int)
     total_passes_home= Required(int)
+    goals = Set('Goal')
+    plays = Set('Play')
+    players = Set('PlayerGame')
 
 class PlayerGame(db.Entity):
     id = PrimaryKey(int, auto=True)
@@ -56,6 +58,7 @@ class PlayerGame(db.Entity):
     game = Required(Game)
     team = Required(str)
     goals = Set('Goal')
+    date = Required(datetime)
 
 class Goal(db.Entity):
     id = PrimaryKey(int, auto=True)
@@ -76,21 +79,12 @@ class Play(db.Entity):
     actor1_name = Optional(str, nullable=True) 
     actor2_name = Optional(str, nullable=True) 
 
-def instantiate():
-	db.bind('sqlite', 'data/nwsl.sqlite', create_db=True)
+
+def instantiate_nwsl():
+	db.bind('sqlite', '../data/nwsl.sqlite', create_db=True)
 	db.generate_mapping(create_tables=True)
 
-def refresh_nwsl():
-    os.remove('data/nwsl.sqlite')
-    instantiate()
-    years = range(2016, 2017)
-    months = range(4,11)
-    matches =[]
-    for year in years:
-        for month in months:
-            matches = matches + get_matches(month, year)
-    print("got matches")
-
+def save_matches(matches):
     for match in matches:
         away_score= int(match['away_score'])
         clearances_away= int(match['clearances_away'])
@@ -122,8 +116,14 @@ def refresh_nwsl():
             offsides_home= int(match['offsides_home'])
         except KeyError:
             offsides_home = -1
-        passing_accuracy_away= int(match['passing_accuracy_away'])
-        passing_accuracy_home= int(match['passing_accuracy_home'])
+        try:
+            passing_accuracy_away= int(match['passing_accuracy_away'])
+        except KeyError:
+            passing_accuracy_away = -1
+        try:
+            passing_accuracy_home= int(match['passing_accuracy_home'])
+        except KeyError:
+            passing_accuracy_home = -1
         possession_away= match['possession_away']
         possession_home= match['possession_home']
         try:
@@ -151,6 +151,7 @@ def refresh_nwsl():
 
         with db_session:
             g = Game(away = match['away'],
+                attendance = match['attendance'],
                 away_score= away_score,
                 clearances_away= clearances_away,
                 clearances_home= clearances_home,
@@ -192,6 +193,7 @@ def refresh_nwsl():
                             start = player['start_minute'],
                             end = player['end_minute'],
                             game = g,
+                            date = g.date,
                             position = player['position'],
                             shirt = player['shirt']
                         )
@@ -215,3 +217,129 @@ def refresh_nwsl():
                         actor2_name = play['actor_2'],
                         game = g
                         ))
+
+@db_session
+def get_player_stats(first, last, team, before_date, after_date=datetime.min):
+    stats = []
+    full_name = first +' '+ last
+    player_games = select(p for p in PlayerGame 
+        if p.first==first and p.last==last and p.date < before_date and p.date > after_date).order_by(desc(PlayerGame.date))
+
+    for game in player_games[:20]:
+        game_obj = select(g for g in Game if g == game.game).get()
+        plays = select(p for p in Play if p.game == game.game)
+        minutes = select(p.minute for p in Play if p.game == game.game)
+        stat = {}
+        stat['game_id'] = game_obj.id
+        if game.start == -1:
+            stat['minutes'] = 0
+            stat['goals'] = 0
+            stat['assists'] = 0
+            stat['shots_on_goal'] = 0
+            stat['yellows'] = 0
+            stat['reds'] = 0
+            stat['fouls_committed'] = 0
+            stat['fouls_sufferred'] = 0
+            stat['saves'] = 0
+            stat['mwg'] = 0
+        else:
+            if game.end != -1:
+                stat['minutes'] = game.end - game.start
+            else:
+                end = minutes.max()
+                stat['minutes'] = end - game.start
+
+            stat['goals'] = select(g for g in Goal 
+                if g.player== game and game_obj==g.game).count()
+            stat['shots_on_goal'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and (p.action=='shot_saved' or
+                    p.action=='shot_blocked' or
+                    p.action=='goal')).count()
+            stat['all_shots'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and (p.action=='shot_saved' or
+                    p.action=='shot_blocked' or
+                    p.action=='goal' or
+                    p.action=='miss')).count()
+            stat['assists_attempts'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor2_name==full_name 
+                and (p.action=='shot_saved' or
+                    p.action=='shot_blocked' or
+                    p.action=='goal')).count()
+            stat['assists'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor2_name==full_name 
+                and p.action=='goal').count()
+            stat['fouls_sufferred'] =select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and p.action=='free_kick_won').count()
+            stat['fouls_committed'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and (p.action=='free_kick_lost')).count()
+
+            #need to deal with gk subs properly but whatever for now
+            stat['saves'] = 0
+            if game.position == "Goalkeeper":
+                stat['saves'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.action=='shot_saved').count()
+                stat['pks_saved'] = 0
+
+
+            stat['reds'] = select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and (p.action=='red')).count()
+            stat['yellows'] =select(p for p in Play 
+                if p.game == game_obj
+                and p.actor1_name==full_name 
+                and (p.action=='yellow')).count()
+
+
+            goals = select(p for p in Play 
+                if p.game == game_obj
+                and p.action=='goal').order_by(Play.minute)
+            teams = {}
+            mwg = None
+            for g in goals:
+                if g.team not in teams:
+                    teams[g.team] = 0
+                teams[g.team] = teams[g.team] + 1
+                steams = max(teams.items(), key=operator.itemgetter(1))
+                if len(steams)>0 and steams[0] != steams[1]:
+                    if g.team == steams[0]:
+                        mwg = g
+            if mwg == game:
+                stat['mwg'] = 1
+            else:
+                stat['mwg'] = 0
+
+            stat['pks_missed'] = 0
+
+
+            if game.team == game_obj.away:
+                stat['team_goals'] = game_obj.away_score
+                stat['against_goals'] = game_obj.home_score
+                stat['home'] = False
+            else:
+                stat['team_goals'] = game_obj.home_score
+                stat['against_goals'] = game_obj.away_score
+                stat['home'] = True
+
+            if stat['against_goals'] == 0:
+                stat['shutout'] = 1
+            else:
+                stat['shutout'] = 0
+        stats.append(stat)
+    return stats
+
+@db_session
+def get_all_matches(team):
+    gs = len(select(g for g in Game if g.home==team or g.away==team))
+    return select(g for g in Game if g.home==team or g.away==team)[:gs]

@@ -4,6 +4,8 @@ from bs4 import BeautifulSoup
 import re
 from pprint import pprint
 from dateutil import parser
+from datetime import datetime, timedelta
+from utils import *
 
 url = 'http://www.nwslsoccer.com/schedule'
 root = 'https://www.nwslsoccer.com'
@@ -15,7 +17,6 @@ def get_matches(month, year):
 	else:
 		month = str(month)
 	path = url+'?season='+str(year)+'&month='+month
-	print(path)
 	soup = BeautifulSoup(urllib.request.urlopen(path).read(), 'html.parser')
 	rows = soup.select('.list-row')
 
@@ -26,11 +27,11 @@ def get_matches(month, year):
 				columns = row.find_all("div", class_="data")
 				dateobj = columns[0].find("div", class_="date")
 				if dateobj.find("span", class_='dark-red') is not None:
-					date = dateobj.find("span", class_='dark-red').text
+					date = dateobj.find("span", class_='dark-red').text + ', ' + str(year)
 				matchup = columns[1].find("div", class_="match-up")
 				location = columns[1].find("div", class_="location").text.strip().replace('\n', ', ')
 				teams = matchup.find_all("span", class_="short")
-				scores = matchup.find_all("p", class_="score")
+				scores = matchup.find_all("span", class_="score")
 				if(len(teams) != 0):
 					home = teams[0].text.strip()
 					away = teams[1].text.strip()
@@ -39,34 +40,42 @@ def get_matches(month, year):
 					link = columns[1].find("div", class_="call-to-action").find_all('a')[0].get('href')
 					dt = parser.parse(date)
 
-					match = get_match_data(home, away, link)
-					if match is not None:
-						match['date'] = dt  
-						match['home'] = home
-						match['away'] = away
-						match['home_score'] = homescore
-						match['away_score'] = awayscore
-						match['location'] = location
-						match['link'] = link
-						matches.append(match)
+					match = {}
+					match['date'] = dt  
+					match['home'] = convert_team_name(home)
+					match['away'] = convert_team_name(away)
+					match['home_score'] = homescore
+					match['away_score'] = awayscore
+					match['location'] = location
+					match['link'] = link
+					matches.append(match)
 		except IndexError as e:
+			print("IndexError")
 			print(e.args)
 	return matches
 
-
-def get_match_data(home, away, link):
-	print(home+' '+away)
-	match = {}
+def get_match_data(match, home, away, link, date):
 	soup = BeautifulSoup(urllib.request.urlopen(root+link).read(), 'html.parser')
-	boxscore = soup.find("div", id="boxscore")
-	stats = boxscore.find('section', class_='list').find_all('div', class_='list-row')
+	stats = soup.find('div', class_='statistics').find('section', class_='list')
+	stats = stats.find_all('div', class_='list-row')
 	for stat in stats:
 		cells = stat.find_all('div', class_='panel-cell')
 		stat_name = str.lower(cells[1].text.strip().replace(' ', '_'))
 		h = stat_name+'_home'
 		a = stat_name+'_away'
-		match[h]= float(cells[0].text.strip())
-		match[a] = float(cells[2].text.strip())
+		if len(cells[0].text.strip().split("%")) <= 1:
+			match[h]= float(cells[0].text.strip())
+		else:
+			match[h]= float(cells[0].text.strip().split("%")[0])/100
+		if len(cells[2].text.strip().split("%")) <= 1:
+			match[a] = float(cells[2].text.strip())
+		else:
+			match[a]= float(cells[2].text.strip().split("%")[0])/100
+
+	att = soup.find_all("p", class_="attendance")[0].find("strong").text.replace(",", "")
+	att = int(att)
+	match['attendance'] = att
+
 
 	match['players'] = []
 
@@ -86,6 +95,7 @@ def get_match_data(home, away, link):
 				player['last'] = player_panel.find_all("span", class_="last-name")[0].text
 				player['team'] = team
 				player['goals'] = []
+				player['date'] = date
 				if position != "Substitute":
 					player['start_minute'] = 0
 					player['end_minute'] = -1
@@ -101,14 +111,18 @@ def get_match_data(home, away, link):
 							for goal in goals:
 								if goal.strip() != '':
 									goal_o = {}
-									goal_o['extra'] = -1
-									goal_o['minute'] = int(goal.strip())
+									g = goal.split("+")
+									if len(stat.text.split("+")) > 1:
+										goal_o['extra'] = int(stat.text.split("+")[1].split("'")[0].strip())
+									else:	
+										goal_o['extra'] = -1
+									goal_o['minute'] = int(stat.text.split("+")[0].split("'")[0].strip())
 									goal_o['team'] = team
 									player['goals'].append(goal_o)
 						elif len(stat.find_all('i', class_='text-success'))>0:
-							player['start_minute'] = int(stat.text.split("'")[0].strip())
+							player['start_minute'] = int(stat.text.split("+")[0].split("'")[0].strip())
 						elif len(stat.find_all('i', class_='text-danger'))>0:
-							player['end_minute'] = int(stat.text.split("'")[0].strip())
+							player['end_minute'] = int(stat.text.split("+")[0].split("'")[0].strip())
 				match['players'].append(player)
 
 
@@ -136,7 +150,10 @@ def get_match_data(home, away, link):
 					play['action'] = "corner"
 					play['team'] = mtext.replace('Corner,', '').split('.')[0].strip()
 					#player that conceded the corner
-					play['actor_1'] = mtext.split('Conceded by ')[1].replace('.', '').strip()
+					try:
+						play['actor_1'] = mtext.split('Conceded by ')[1].replace('.', '').strip()
+					except IndexError:
+						play['actor_1'] = ""
 				elif "OFFSIDE" in mess.find('h4'):
 					play['action'] = "offside"
 					play['team'] = mtext.replace('Offside,', '').split('.')[0].strip()
@@ -192,10 +209,10 @@ def get_match_data(home, away, link):
 					#possible assisted
 					if len(mtext.split('Assisted by ')) > 1:
 						play['actor_2'] = mtext.split('Assisted by ')[1].split('with')[0].replace('.', '').strip()
-				elif "END 1" in mess.find('h4'):
-					print("END 1")
-				elif "END 2" in mess.find('h4'):
-					print("END 2")
+				# elif "END 1" in mess.find('h4'):
+				# 	print("END 1")
+				# elif "END 2" in mess.find('h4'):
+				# 	print("END 2")
 				# else:
 				# 	print(mess.find('h4').text)
 				try:
@@ -204,3 +221,47 @@ def get_match_data(home, away, link):
 				except KeyError:
 					test = 'unimportant play'
 	return match
+
+def get_weeks_matches(week, year=2017):
+	start = calculate_start_date(week, year)
+	return get_matches_between(start, start+timedelta(weeks=1))
+
+def get_matches_between(start, end):
+	matches = []
+	for month in range(start.month, end.month+1):
+		if month <10:
+			month = '0' + str(month)
+		else:
+			month = str(month)
+		path = url+'?season='+str(start.year)+'&month='+ month
+		soup = BeautifulSoup(urllib.request.urlopen(path).read(), 'html.parser')
+		rows = soup.select('.list-row')
+
+		date = ''
+		for row in rows:
+			try:
+				columns = row.find_all("div", class_="data")
+				dateobj = columns[0].find("div", class_="date")
+				if dateobj.find("span", class_='dark-red') is not None:
+					date = dateobj.find("span", class_='dark-red').text + ', ' + str(start.year)
+				matchup = columns[1].find("div", class_="match-up")
+				location = columns[1].find("div", class_="location").text.strip().replace('\n', ', ')
+				teams = matchup.find_all("span", class_="short")
+				if(len(teams) != 0):
+					home = teams[0].text.strip()
+					away = teams[1].text.strip()
+					link = columns[1].find("div", class_="call-to-action").find_all('a')[0].get('href')
+					dt = parser.parse(date)
+
+					match = {}
+					match['date'] = dt  
+					match['home'] = convert_team_name(home)
+					match['away'] = convert_team_name(away)
+					match['location'] = location
+					match['link'] = link
+
+					if dt.date() >= start and dt.date() < end:
+						matches.append(match)
+			except IndexError as e:
+				print(e.args)
+	return matches

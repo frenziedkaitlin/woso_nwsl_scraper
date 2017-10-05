@@ -1,7 +1,6 @@
-from nwsl_db import instantiate, refresh_nwsl
+from scrape import refresh_nwsl, hard_refresh_nwsl
 
 def scrape_nwsl():
 	refresh_nwsl()
 
-def instantiate_db():
-	instantiate()
+scrape_nwsl()
